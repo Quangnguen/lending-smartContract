@@ -102,6 +102,11 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard {
         return (userBorrowedLoans[user], userLentLoans[user]);
     }
 
+    function whitelistToken(address token, bool status) external onlyOwner {
+        whitelistedTokens[token] = status;
+        emit TokenWhitelisted(token, status);
+    }
+
     function isTokenWhitelisted(address token) external view override returns (bool) {
         return whitelistedTokens[token];
     }
@@ -115,11 +120,6 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard {
     }
 
     // Admin functions
-    function setTokenWhitelist(address token, bool status) external onlyOwner {
-        whitelistedTokens[token] = status;
-        emit TokenWhitelisted(token, status);
-    }
-    
     function setPlatformFee(uint256 newFee) external onlyOwner {
         uint256 oldFee = platformFee;
         platformFee = newFee;
