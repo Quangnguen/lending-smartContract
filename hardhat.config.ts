@@ -8,10 +8,18 @@ export default defineConfig({
     profiles: {
       default: {
         version: "0.8.28",
+        settings: {
+          evmVersion: "paris",
+          optimizer: {
+            enabled: true,
+            runs: 200,
+          },
+        },
       },
       production: {
         version: "0.8.28",
         settings: {
+          evmVersion: "paris",
           optimizer: {
             enabled: true,
             runs: 200,
@@ -28,6 +36,12 @@ export default defineConfig({
     hardhatOp: {
       type: "edr-simulated",
       chainType: "op",
+    },
+    ganache: {
+      type: "http",
+      chainType: "l1",
+      url: "http://127.0.0.1:7545",
+      accounts: [process.env.GANACHE_PRIVATE_KEY || ""],
     },
     sepolia: {
       type: "http",
