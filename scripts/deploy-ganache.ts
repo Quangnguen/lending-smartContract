@@ -9,6 +9,11 @@
 import { network } from "hardhat";
 import * as fs from "fs";
 import * as path from "path";
+import { fileURLToPath } from "url";
+
+// ES module điều: __dirname không tồn tại, phải dùng import.meta.url
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Connect to Ganache network
 const { ethers } = await network.connect({
@@ -65,7 +70,10 @@ console.log("✅ CollateralManager deployed to:", collateralManagerAddress);
 
 // ========== 5. Deploy P2PLending ==========
 console.log("\n5️⃣ Deploying P2PLending...");
-const p2pLending = await ethers.deployContract("P2PLending", [deployer.address]);
+const p2pLending = await ethers.deployContract("P2PLending", [
+  deployer.address,
+  collateralManagerAddress, // ← wired vào CollateralManager ngay khi deploy
+]);
 await p2pLending.waitForDeployment();
 const p2pLendingAddress = await p2pLending.getAddress();
 console.log("✅ P2PLending deployed to:", p2pLendingAddress);
@@ -77,6 +85,10 @@ console.log("   ↳ Whitelisted USDT token");
 // Link CreditScoreOracle to P2PLending
 await p2pLending.setCreditScoreOracle(creditScoreOracleAddress);
 console.log("   ↳ Linked CreditScoreOracle to P2PLending");
+
+// Transfer ownership of CollateralManager to P2PLending so it can call setAuthorizedCaller
+await collateralManager.transferOwnership(p2pLendingAddress);
+console.log("   ↳ Transferred ownership of CollateralManager to P2PLending");
 
 // ========== 6. Deploy DebtToken (ERC-721 Soulbound) ==========
 console.log("\n6️⃣ Deploying DebtToken (Soulbound NFT)...");

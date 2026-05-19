@@ -12,7 +12,7 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
     
     uint256 public constant BASIS_POINTS = 10000;
-    uint256 public constant DEFAULT_LIQUIDATION_THRESHOLD = 12000; // 120%
+    uint256 public constant DEFAULT_LIQUIDATION_THRESHOLD = 11000; // 110%
     uint256 public constant DEFAULT_LIQUIDATION_BONUS = 500; // 5%
     address public constant ETH_ADDRESS = address(0);
     IPriceOracle public priceOracle;
@@ -26,12 +26,16 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
         bool isActive;
     }
     mapping(uint256 => CollateralInfo) public collaterals;
+    /// @dev Loan contracts được phép gọi withdrawCollateral thay mặt borrower
+    mapping(address => bool) public authorizedCallers;
 
     error InvalidAmount();
     error CollateralNotActive();
     error NotLiquidatable();
     error Unauthorized();
     error TransferFailed();
+
+    event CallerAuthorized(address indexed caller, bool status);
 
    constructor(
         address _priceOracle,
@@ -44,6 +48,7 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
 
     function depositCollateral(
         uint256 loanId,
+        address borrower,
         address token,
         uint256 amount
     ) external payable override nonReentrant {
@@ -58,32 +63,45 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
             depositAmount = amount;
             IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         }
-        collaterals[loanId] = CollateralInfo({
-            token: token,
-            amount: depositAmount,
-            borrower: msg.sender,
-            isActive: true
-        });
-        emit CollateralDeposited(loanId, msg.sender, token, depositAmount);
+
+        CollateralInfo storage info = collaterals[loanId];
+        if (info.isActive) {
+            if (info.borrower != borrower) revert("Borrower mismatch");
+            info.amount += depositAmount;
+        } else {
+            collaterals[loanId] = CollateralInfo({
+                token: token,
+                amount: depositAmount,
+                borrower: borrower,
+                isActive: true
+            });
+        }
+        emit CollateralDeposited(loanId, borrower, token, depositAmount);
     }
 
     function withdrawCollateral(uint256 loanId) external override nonReentrant {
         CollateralInfo storage info = collaterals[loanId];
         
         if (!info.isActive) revert CollateralNotActive();
-        if (msg.sender != info.borrower) revert Unauthorized();
+
+        // Cho phép: borrower tự withdraw HOẶC Loan contract được ủy quyền
+        bool isBorrower = msg.sender == info.borrower;
+        bool isAuthorized = authorizedCallers[msg.sender];
+        if (!isBorrower && !isAuthorized) revert Unauthorized();
+
         uint256 amount = info.amount;
         address token = info.token;
+        address recipient = info.borrower; // Luôn trả về borrower, không phải caller
         
         info.isActive = false;
         info.amount = 0;
         if (token == ETH_ADDRESS) {
-            (bool success,) = payable(msg.sender).call{value: amount}("");
+            (bool success,) = payable(recipient).call{value: amount}("");
             if (!success) revert TransferFailed();
         } else {
-            IERC20(token).safeTransfer(msg.sender, amount);
+            IERC20(token).safeTransfer(recipient, amount);
         }
-        emit CollateralWithdrawn(loanId, msg.sender, token, amount);
+        emit CollateralWithdrawn(loanId, recipient, token, amount);
     }
 
     function liquidate(uint256 loanId) external override nonReentrant {
@@ -110,7 +128,7 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
         (uint256 price,) = priceOracle.getPrice(info.token);
         return (info.amount * price) / 1e18;
     }
-    function getCollateralRatio(uint256 loanId) external view override returns (uint256) {
+    function getCollateralRatio(uint256 /* loanId */) external pure override returns (uint256) {
         // Simplified - sẽ cần loanValue từ Loan contract
         return BASIS_POINTS * 150 / 100; // Placeholder 150%
     }
@@ -123,5 +141,15 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
     function getLiquidationBonus() external view override returns (uint256) {
         return liquidationBonus;
     }
+
+    /**
+     * @dev Admin cho phép/thu hồi quyền của Loan contract
+     * Gọi sau khi deploy Loan contract để cho phép auto-release collateral khi repay
+     */
+    function setAuthorizedCaller(address caller, bool status) external onlyOwner {
+        authorizedCallers[caller] = status;
+        emit CallerAuthorized(caller, status);
+    }
+
     receive() external payable {}
 }

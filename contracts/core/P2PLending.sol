@@ -5,6 +5,10 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "../interfaces/IP2PLending.sol";
 import "../interfaces/ICreditScoreOracle.sol";
+import "../interfaces/ICollateralManager.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/proxy/Clones.sol";
 import "./Loan.sol";
 
 /**
@@ -23,6 +27,8 @@ import "./Loan.sol";
  * 4. Lender fund → deploy Loan contract → giải ngân
  */
 contract P2PLending is IP2PLending, Ownable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+    using Clones for address;  // EIP-1167 Minimal Proxy
     uint256 public constant BASIS_POINTS = 10000;
     uint256 public platformFee = 100; // 1%
     uint256 public minCollateralRatio = 15000; // 150% — fallback khi không có Oracle
@@ -31,6 +37,8 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard {
 
     /// @dev Credit Score Oracle — cho phép dynamic collateral ratio
     ICreditScoreOracle public creditScoreOracle;
+    /// @dev CollateralManager — quản lý ETH collateral, hoàn trả khi repay
+    ICollateralManager public collateralManager;
 
     mapping(uint256 => LoanRequest) public loanRequests;
     mapping(uint256 => address) public requestBorrower;
@@ -43,6 +51,9 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard {
     mapping(address => address[]) public userLentLoans;
     uint256[] public pendingRequestIds;
 
+    /// @dev Loan implementation — deploy 1 lần duy nhất, tất cả clone dùng chung
+    address public loanImplementation;
+
     error TokenNotWhitelisted();
     error RequestNotActive();
     error NotRequestOwner();
@@ -51,8 +62,13 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard {
     // Events cho Oracle integration
     event CreditScoreOracleUpdated(address indexed oldOracle, address indexed newOracle);
     event CollateralRatioApplied(uint256 indexed requestId, address indexed borrower, uint256 ratio, uint256 creditScore);
+    event CollateralManagerUpdated(address indexed oldManager, address indexed newManager);
 
-    constructor(address initialOwner) Ownable(initialOwner) {}
+    constructor(address initialOwner, address _collateralManager) Ownable(initialOwner) {
+        collateralManager = ICollateralManager(_collateralManager);
+        // Deploy Loan implementation một lần — các clone sau này dùng lại bytecode này
+        loanImplementation = address(new Loan());
+    }
 
     /**
      * @dev Tạo yêu cầu vay — collateral ratio được tính dynamic từ Oracle
@@ -66,7 +82,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard {
      *   - Dùng minCollateralRatio (150%) — backward compatible
      */
     function createLoanRequest(LoanRequest calldata request) 
-        external override returns (uint256 requestId) 
+        external payable override returns (uint256 requestId) 
     {
         if (!whitelistedTokens[request.loanToken]) revert TokenNotWhitelisted();
         
@@ -79,6 +95,13 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard {
         requestActive[requestId] = true;
         requestCollateralRatio[requestId] = requiredRatio;
         pendingRequestIds.push(requestId);
+
+        // Nạp ETH vào CollateralManager luôn nếu có gửi kèm (deposit trực tiếp dưới tên borrower)
+        if (msg.value > 0 && address(collateralManager) != address(0)) {
+            collateralManager.depositCollateral{value: msg.value}(
+                requestId, msg.sender, address(0), msg.value
+            );
+        }
 
         // Lấy credit score để emit event (0 nếu không có Oracle)
         uint256 creditScore = 0;
@@ -106,16 +129,30 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard {
         LoanRequest memory req = loanRequests[requestId];
         address borrower = requestBorrower[requestId];
 
-        // Deploy new Loan contract
-        Loan loan = new Loan(
+        // Chuyển USDT từ Lender (msg.sender) sang Borrower (vay ngang hàng)
+        IERC20(req.loanToken).safeTransferFrom(msg.sender, borrower, req.principal);
+
+        // Tạo Loan clone (EIP-1167 Minimal Proxy) — tiết kiệm ~80% gas
+        // thay vì: new Loan(...) → ~900K gas
+        // bây giờ: clone(impl) + initialize() → ~50K + 150K = 200K gas
+        address loanClone = loanImplementation.clone();
+        Loan loan = Loan(loanClone);
+        loan.initialize(
             requestId, borrower, req.loanToken, req.collateralToken,
             req.principal, req.interestRate, req.collateralAmount,
-            req.duration, lateFeeRate
+            req.duration, lateFeeRate,
+            address(collateralManager)
         );
-        loanContract = address(loan);
+        loanContract = loanClone;
+
+        // Authorize Loan clone được gọi withdrawCollateral thay mặt borrower
+        if (address(collateralManager) != address(0)) {
+            collateralManager.setAuthorizedCaller(loanContract, true);
+        }
 
         // Fund the loan
-        loan.fund();
+        loan.fund(msg.sender);
+        
         requestActive[requestId] = false;
         requestToLoan[requestId] = loanContract;
         userBorrowedLoans[borrower].push(loanContract);
@@ -209,6 +246,15 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard {
         address oldOracle = address(creditScoreOracle);
         creditScoreOracle = ICreditScoreOracle(_oracle);
         emit CreditScoreOracleUpdated(oldOracle, _oracle);
+    }
+
+    /**
+     * @dev Set CollateralManager address (admin only)
+     */
+    function setCollateralManager(address _manager) external onlyOwner {
+        address oldManager = address(collateralManager);
+        collateralManager = ICollateralManager(_manager);
+        emit CollateralManagerUpdated(oldManager, _manager);
     }
 
     /**

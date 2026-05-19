@@ -33,6 +33,7 @@ interface ICollateralManager {
     // CORE FUNCTION
     function depositCollateral(
         uint256 loanId,
+        address borrower,
         address token,
         uint256 amount
     ) external payable;
@@ -73,4 +74,7 @@ interface ICollateralManager {
         external
         view
         returns (uint256);
+
+    /// @dev Admin function: cho phép Loan contract tự động withdraw collateral khi repay
+    function setAuthorizedCaller(address caller, bool status) external;
 }

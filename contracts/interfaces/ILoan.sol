@@ -56,9 +56,9 @@ interface ILoan {
     function getLoanDetails() external view returns (LoanDetails memory); 
 
     // Người cho vay chuyển tiền
-    function fund() external;
+    function fund(address lender) external;
 
-    function depositCollateral() external payable;
+
 
     function repay() external;
 

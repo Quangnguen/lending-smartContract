@@ -45,7 +45,7 @@ interface IP2PLending {
 
     // FUNCTION
     function createLoanRequest(LoanRequest calldata request)
-        external
+        external payable
         returns (uint256 requestId);
 
     function cancelLoanRequest(uint256 requestId)

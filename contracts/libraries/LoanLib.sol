@@ -6,7 +6,7 @@ import "../interfaces/ILoan.sol";
 library LoanLib {
     uint256 public constant BASIS_POINTS = 10000;
     uint256 public constant DEFAULT_MIN_COLLATERAL_RATIO = 15000;
-    uint256 public constant DEFAULT_LIQUIDATION_THRESHOLD = 12000;
+    uint256 public constant DEFAULT_LIQUIDATION_THRESHOLD = 11000;
     uint256 public constant MIN_LOAN_DURATION = 1 days;
     uint256 public constant MAX_LOAN_DURATION = 365 days;
     uint256 public constant MAX_INTEREST_RATE = 10000;
