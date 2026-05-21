@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.28;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "../interfaces/ICreditScoreOracle.sol";
@@ -19,13 +19,13 @@ import "../interfaces/ICreditScoreOracle.sol";
  * - Owner có thể thay đổi oracleUpdater nếu cần rotate key
  * - Score có thời hạn (mặc định 30 ngày), quá hạn cần tính lại
  *
- * Dynamic Collateral Ratio:
- *   Score >= 800 → 50%  (under-collateralized, gần tín chấp)
- *   Score >= 700 → 80%
- *   Score >= 600 → 100%
- *   Score >= 500 → 120%
- *   Score >= 400 → 135%
- *   Score <  400 → 150% (full collateral, giống DeFi thuần túy)
+ * Dynamic Collateral Ratio (basis points):
+ *   Score >= 800 → 13500 (135%) — EXCELLENT   (có thể vay với ít thế chấp nhất)
+ *   Score >= 700 → 14500 (145%) — VERY_GOOD
+ *   Score >= 600 → 15500 (155%) — GOOD
+ *   Score >= 500 → 16500 (165%) — FAIR
+ *   Score >= 400 → 17500 (175%) — BELOW_FAIR
+ *   Score <  400 → 19000 (190%) — POOR (full collateral, ETH có thể giảm 47% trước khi lý ngưỡng 110%)
  */
 contract CreditScoreOracle is ICreditScoreOracle, Ownable {
     // ===== STATE =====
@@ -214,19 +214,24 @@ contract CreditScoreOracle is ICreditScoreOracle, Ownable {
     /**
      * @dev Chuyển đổi score (0-1000) → collateral ratio (basis points)
      *
-     * Score >= 800: 5000  (50%)  — EXCELLENT
-     * Score >= 700: 8000  (80%)  — VERY_GOOD
-     * Score >= 600: 10000 (100%) — GOOD
-     * Score >= 500: 12000 (120%) — FAIR
-     * Score >= 400: 13500 (135%) — BELOW_FAIR
-     * Score <  400: 15000 (150%) — POOR
+     * Tiếu chí thiết kế:
+     *   1. Floor = 13500 (135%): ETH có thể giảm 18% trước khi xuống ngưỡng 110% thanh lý
+     *   2. Ceiling = 19000 (190%): Buffer 72% cho borrower có rủi ro cao
+     *   3. Gradient đều: mỗi tier cách nhau 1000bps (10%)
+     *
+     * Score >= 800: 13500 (135%) — EXCELLENT   → ETH có thể giảm 18% an toàn
+     * Score >= 700: 14500 (145%) — VERY_GOOD   → Buffer 28% trước liquidation
+     * Score >= 600: 15500 (155%) — GOOD        → Buffer 38%
+     * Score >= 500: 16500 (165%) — FAIR        → Buffer 48%
+     * Score >= 400: 17500 (175%) — BELOW_FAIR  → Buffer 58%
+     * Score <  400: 19000 (190%) — POOR        → Buffer 72%
      */
     function _scoreToCollateralRatio(uint256 score) internal pure returns (uint256) {
-        if (score >= 800) return 5000;   // 50%
-        if (score >= 700) return 8000;   // 80%
-        if (score >= 600) return 10000;  // 100%
-        if (score >= 500) return 12000;  // 120%
-        if (score >= 400) return 13500;  // 135%
-        return 15000;                    // 150%
+        if (score >= 800) return 13500;  // 135% — EXCELLENT
+        if (score >= 700) return 14500;  // 145% — VERY_GOOD
+        if (score >= 600) return 15500;  // 155% — GOOD
+        if (score >= 500) return 16500;  // 165% — FAIR
+        if (score >= 400) return 17500;  // 175% — BELOW_FAIR
+        return 19000;                    // 190% — POOR
     }
 }

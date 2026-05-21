@@ -1,76 +1,232 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.28;
 
+/**
+ * @title ILoan
+ * @dev Interface cho Loan clone contract (EIP-1167)
+ *
+ * Lifecycle state machine:
+ *
+ *   PENDING ──fund()──► ACTIVE ──repay()──────────► REPAID
+ *      │                   │     repayOnBehalf()
+ *    cancel()          isOverdue()
+ *      │                   │
+ *      ▼                   ▼
+ *   CANCELLED           OVERDUE ──[grace period]──► DEFAULTED
+ *                           │
+ *                       liquidate()
+ *                           │
+ *                           ▼
+ *                       LIQUIDATED
+ *
+ * Key design decisions:
+ *   • repayOnBehalf(): Bất kỳ ai có thể trả nợ thay borrower
+ *     → Dùng khi borrower mất ví hoặc cần emergency rescue
+ *   • Interest cap tại endTime (không tăng sau endTime)
+ *   • Late fee riêng biệt từ endTime → repayment time
+ *   • Collateral release: try-catch, không block repayment
+ */
 interface ILoan {
+
+    // =========================================================
+    // ENUMS
+    // =========================================================
+
     enum LoanStatus {
-        PENDING, // 0 - đang chờ người cho vay
-        ACTIVE, // 1 - đang hoạt động (đã được fund)
-        REPAID, // 2 - đã trả hết nợ
-        DEFAULTED, // 3 - vỡ nợ/qua hạn không trả
-        LIQUIDATED, // 4 - đã thanh lý tài sản thế chấp
-        CANCELLED // 5 - đã hủy (trước khi được fund)
+        PENDING,    // 0 — Chờ lender cấp vốn
+        ACTIVE,     // 1 — Đang hoạt động (đã funded)
+        REPAID,     // 2 — Đã trả đầy đủ
+        OVERDUE,    // 3 — Quá hạn (chưa vượt grace period)
+        DEFAULTED,  // 4 — Vỡ nợ (> grace period, chưa liquidated)
+        LIQUIDATED, // 5 — Đã thanh lý tài sản thế chấp
+        CANCELLED   // 6 — Hủy trước khi được fund
     }
+
+    // =========================================================
+    // STRUCTS
+    // =========================================================
 
     struct LoanDetails {
         uint256 loanId;
         address borrower;
-        address lender; 
-        address loanToken;
-        address collateralToken;
-        uint256 principal;
-        uint256 interestRate;
-        uint256 collateralAmount;
-        uint256 duration;
-        uint256 startTime;
-        uint256 endTime;
+        address lender;
+        address loanToken;          // Token cho vay (e.g., USDT)
+        address collateralToken;    // address(0) = ETH, khác = ERC-20
+        uint256 principal;          // Số tiền gốc (loanToken decimals)
+        uint256 interestRate;       // Lãi suất năm (basis points, 1000 = 10%)
+        uint256 collateralAmount;   // Số lượng tài sản thế chấp
+        uint256 duration;           // Thời hạn vay (giây)
+        uint256 startTime;          // Thời điểm được fund (block.timestamp)
+        uint256 endTime;            // Thời điểm đáo hạn
+        uint256 createdAt;          // Thời điểm tạo request
         LoanStatus status;
     }
+
+    // =========================================================
+    // EVENTS — Đầy đủ cho indexer / subgraph
+    // =========================================================
 
     event LoanCreated(
         uint256 indexed loanId,
         address indexed borrower,
-        uint256 principal
+        address loanToken,
+        address collateralToken,
+        uint256 principal,
+        uint256 interestRate,
+        uint256 collateralAmount,
+        uint256 duration
     );
 
     event LoanFunded(
         uint256 indexed loanId,
-        address indexed lender
+        address indexed lender,
+        uint256 startTime,
+        uint256 endTime
     );
 
+    /**
+     * @dev Emit khi repay() hoặc repayOnBehalf() thành công
+     *
+     * Trường payer phân biệt borrower tự trả vs bên thứ 3 trả thay.
+     * Trường repaidAt để audit trail chính xác (không phải block.timestamp riêng).
+     */
     event LoanRepaid(
         uint256 indexed loanId,
-        uint256 totalAmount
+        address indexed borrower,
+        address indexed payer,      // Người thực sự chuyển USDT (có thể != borrower)
+        uint256 principal,
+        uint256 interest,
+        uint256 lateFee,
+        uint256 totalAmount,
+        uint256 repaidAt,           // block.timestamp khi trả
+        bool    isOverdue           // Có trả trễ không
+    );
+
+    /**
+     * @dev Emit khi collateral được trả về borrower thành công
+     */
+    event CollateralReleased(
+        uint256 indexed loanId,
+        address indexed borrower,
+        address token,
+        uint256 amount
+    );
+
+    /**
+     * @dev Emit khi release collateral fail (try-catch)
+     * Borrower cần gọi manual withdrawal sau đó
+     */
+    event CollateralReleaseFailed(
+        uint256 indexed loanId,
+        address indexed borrower,
+        uint256 collateralAmount,
+        string  reason
     );
 
     event LoanLiquidated(
         uint256 indexed loanId,
-        address indexed liquidator
+        address indexed liquidator,
+        uint256 collateralSeized
     );
 
     event LoanCancelled(
-        uint256 indexed loanId
+        uint256 indexed loanId,
+        address indexed borrower
     );
 
+    event LoanOverdue(
+        uint256 indexed loanId,
+        address indexed borrower,
+        uint256 overdueAt,
+        uint256 daysOverdue
+    );
 
-    // Lấy thông tin khoản vay
-    function getLoanDetails() external view returns (LoanDetails memory); 
+    // =========================================================
+    // WRITE FUNCTIONS
+    // =========================================================
 
-    // Người cho vay chuyển tiền
+    function initialize(
+        uint256 _loanId,
+        address _borrower,
+        address _loanToken,
+        address _collateralToken,
+        uint256 _principal,
+        uint256 _interestRate,
+        uint256 _collateralAmount,
+        uint256 _duration,
+        uint256 _lateFeeRate,
+        address _collateralManager
+    ) external;
+
+    /// @dev Lender cấp vốn — chỉ factory được gọi
     function fund(address lender) external;
 
-
-
+    /**
+     * @notice Borrower tự trả nợ
+     * Require: caller == borrower, status == ACTIVE, allowance đủ
+     */
     function repay() external;
 
+    /**
+     * @notice Bất kỳ ai trả nợ thay borrower
+     *
+     * Use cases:
+     *   1. Emergency rescue: bạn bè/gia đình trả thay khi borrower mất ví
+     *   2. Protocol rescue: keeper trả thay khi loan sắp bị liquidate
+     *   3. Automation: smart contract tự động trả khi deadline gần
+     *
+     * Security:
+     *   - Payer approve Loan contract với số tiền cần thiết
+     *   - Collateral vẫn về borrower (không phải payer)
+     *   - Payer không nhận được gì (pure altruistic / protocol mechanism)
+     *
+     * @param payer Địa chỉ chuyển USDT (phải đã approve)
+     */
+    function repayOnBehalf(address payer) external;
+
+    /// @dev Thanh lý — chỉ factory được gọi
     function liquidate() external;
 
+    /// @dev Hủy request — chỉ borrower, chỉ khi PENDING
     function cancel() external;
 
+    // =========================================================
+    // VIEW FUNCTIONS
+    // =========================================================
+
+    function getLoanDetails() external view returns (LoanDetails memory);
+
+    /// @dev Tổng số tiền cần trả tại block.timestamp hiện tại
     function getTotalRepaymentAmount() external view returns (uint256);
 
+    /**
+     * @dev Breakdown số tiền cần trả: (principal, interest, lateFee)
+     *
+     * Interest được cap tại endTime (không tăng sau đáo hạn).
+     * Late fee tính riêng từ endTime đến block.timestamp.
+     */
+    function getRepaymentBreakdown()
+        external
+        view
+        returns (uint256 principal, uint256 interest, uint256 lateFee);
+
+    /// @dev Kiểm tra loan có đang quá hạn không
     function isOverdue() external view returns (bool);
 
-    function getCollateralRatio() external view returns (uint256);
+    /**
+     * @dev Tỷ lệ thế chấp hiện tại
+     * @return 0 nếu cần oracle (dùng CollateralManager.getCollateralRatio)
+     */
+    function getCurrentCollateralRatio() external view returns (uint256);
 
-    
+    /**
+     * @dev Timestamp khi đã repaid (0 nếu chưa trả)
+     * Dùng cho audit và indexer
+     */
+    function repaidAt() external view returns (uint256);
+
+    /**
+     * @dev Địa chỉ payer thực sự (khác borrower nếu repayOnBehalf)
+     */
+    function actualPayer() external view returns (address);
 }

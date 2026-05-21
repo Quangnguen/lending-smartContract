@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.28;
 
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
 /**
  * @title DebtToken (ERC-721)
@@ -22,6 +23,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
  * - Lender bảo vệ: Kiểm tra borrower có DebtToken trước khi fund
  */
 contract DebtToken is ERC721Enumerable, Ownable {
+    using EnumerableSet for EnumerableSet.UintSet; // FIX H-4
     // ===== STATE =====
 
     uint256 private _nextTokenId = 1;
@@ -44,7 +46,12 @@ contract DebtToken is ERC721Enumerable, Ownable {
     /// @dev tokenId => DebtRecord
     mapping(uint256 => DebtRecord) public debtRecords;
 
-    /// @dev borrower => tokenId[] (tra cứu nhanh)
+    /// @dev FIX H-4: Dùng EnumerableSet thay array unbounded
+    /// borrower => Set của tokenIds (chống DoS push attack)
+    mapping(address => EnumerableSet.UintSet) private _borrowerDebtTokens;
+
+    /// @dev DEPRECATED: giữ lại cho backward compat với tests
+    /// Sử dụng _borrowerDebtTokens thay thế
     mapping(address => uint256[]) public borrowerDebts;
 
     // ===== EVENTS =====
@@ -68,7 +75,7 @@ contract DebtToken is ERC721Enumerable, Ownable {
     // ===== MODIFIERS =====
 
     modifier onlyAuthorizedMinter() {
-        if (!authorizedMinters[msg.sender] && msg.sender != owner()) {
+        if (!authorizedMinters[msg.sender]) {
             revert NotAuthorizedMinter();
         }
         _;
@@ -77,7 +84,7 @@ contract DebtToken is ERC721Enumerable, Ownable {
     // ===== CONSTRUCTOR =====
 
     constructor(address initialOwner) ERC721("P2P Lending Debt Token", "DEBT") Ownable(initialOwner) {
-        authorizedMinters[initialOwner] = true;
+        // Fix: Do not authorize the initial owner to mint. Only P2PLending contract should be authorized.
     }
 
     // ===== CORE FUNCTIONS =====
@@ -114,7 +121,9 @@ contract DebtToken is ERC721Enumerable, Ownable {
             loanContract: loanContract
         });
 
-        borrowerDebts[borrower].push(tokenId);
+        // FIX H-4: Dùng EnumerableSet thay array unbounded
+        _borrowerDebtTokens[borrower].add(tokenId);
+        borrowerDebts[borrower].push(tokenId); // giữ lại cho backward compat
 
         emit DebtTokenMinted(tokenId, borrower, loanId, debtAmount, reason);
     }
@@ -122,18 +131,18 @@ contract DebtToken is ERC721Enumerable, Ownable {
     // ===== VIEW FUNCTIONS =====
 
     /**
-     * @dev Lấy tổng số DebtToken của borrower
-     * Lender nên kiểm tra trước khi fund
+     * @dev FIX H-4: Trả về set tokens (EnumerableSet) — không bị DoS
+     * Dùng ERC721Enumerable.balanceOf + tokenOfOwnerByIndex thay thế cũ
      */
     function getDebtCount(address borrower) external view returns (uint256) {
-        return borrowerDebts[borrower].length;
+        return balanceOf(borrower); // ERC721Enumerable built-in — O(1)
     }
 
     /**
-     * @dev Lấy danh sách DebtToken IDs của borrower
+     * @dev FIX H-4: Dùng EnumerableSet thay array
      */
     function getBorrowerDebtTokens(address borrower) external view returns (uint256[] memory) {
-        return borrowerDebts[borrower];
+        return _borrowerDebtTokens[borrower].values();
     }
 
     /**
@@ -144,20 +153,26 @@ contract DebtToken is ERC721Enumerable, Ownable {
     }
 
     /**
-     * @dev Tổng nợ xấu tích lũy của borrower
+     * @dev FIX L-8: Tránh O(N) loop — dùng ERC721Enumerable để iterate
+     * Dùng tokenOfOwnerByIndex() built-in thay vì array loop
+     *
+     * Note: Vẫn O(N) nhưng ERC721Enumerable dùng được; frontend nên dùng events
+     * thay vì gọi hàm này cho user có nhiều DebtTokens.
      */
     function getTotalDebt(address borrower) external view returns (uint256 total) {
-        uint256[] memory debts = borrowerDebts[borrower];
-        for (uint256 i = 0; i < debts.length; i++) {
-            total += debtRecords[debts[i]].debtAmount;
+        uint256 count = balanceOf(borrower);
+        for (uint256 i = 0; i < count; i++) {
+            uint256 tid = tokenOfOwnerByIndex(borrower, i);
+            total += debtRecords[tid].debtAmount;
         }
     }
 
     /**
      * @dev Kiểm tra borrower có nợ xấu không
+     * FIX L-8: Dùng balanceOf() O(1) thay vì array.length
      */
     function hasDebt(address borrower) external view returns (bool) {
-        return borrowerDebts[borrower].length > 0;
+        return balanceOf(borrower) > 0; // ERC721Enumerable built-in
     }
 
     // ===== SOULBOUND: Chặn transfer =====

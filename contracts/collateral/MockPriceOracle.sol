@@ -1,123 +1,211 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity 0.8.28;
 
 import "../interfaces/IPriceOracle.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
 /**
  * @title MockPriceOracle
- * @dev Oracle giá giả lập để test trên testnet
+ * @dev Oracle giá giả lập cho testnet / unit tests
+ *
+ * Implement đầy đủ IPriceOracle (bao gồm getPriceSafe, getValueInUSD, maxPriceAge).
+ * Price format: 8 decimals (chuẩn Chainlink)
+ *   VD: ETH = $2000 → 2_000_00_000_000 = 200000000000
  */
 contract MockPriceOracle is IPriceOracle, Ownable {
-    // Lưu giá và timestamp cập nhật gần nhất
+    using EnumerableSet for EnumerableSet.AddressSet; // FIX M-11
+
+    // =========================================================
+    // STRUCTS
+    // =========================================================
+
     struct PriceData {
-        uint256 price;      // price * 1e8 (8 decimals)
-        uint256 timestamp;  // block.timestamp lúc cập nhật
+        uint256 price;      // 8 decimals (Chainlink standard)
+        uint256 updatedAt;  // block.timestamp khi update
     }
-    
-    mapping(address => PriceData) public priceData;
-    mapping(address => address) public priceFeeds; // Mock price feed addresses
-    
+
+    // =========================================================
+    // STATE
+    // =========================================================
+
+    uint256 private _maxPriceAge = 3600; // 1 giờ mặc định (configurable)
+
+    mapping(address => PriceData) private _priceData;
+    mapping(address => address)   public  priceFeeds;
+    mapping(address => bool)      private _supported;
+
+    /// @dev FIX M-11: Dùng EnumerableSet thay array unbounded
+    EnumerableSet.AddressSet private _tokenSet;
+
+    // =========================================================
+    // ERRORS
+    // =========================================================
+
+    error MockPriceOracle__PriceNotSet(address token);
+    error MockPriceOracle__PriceStale(address token, uint256 age, uint256 maxAge);
+    error MockPriceOracle__ZeroPrice();
+
+    // =========================================================
+    // CONSTRUCTOR
+    // =========================================================
+
     constructor(address initialOwner) Ownable(initialOwner) {
-        // Set giá mặc định cho ETH = $2000
-        priceData[address(0)] = PriceData({
-            price: 2000 * 1e8,
-            timestamp: block.timestamp
-        });
+        // ETH mặc định $2000 (8 decimals)
+        _setPrice(address(0), 2_000 * 1e8);
     }
-    
+
+    // =========================================================
+    // IPriceOracle IMPLEMENTATION
+    // =========================================================
+
+    /// @inheritdoc IPriceOracle
+    function maxPriceAge() external view override returns (uint256) {
+        return _maxPriceAge;
+    }
+
+    /// @inheritdoc IPriceOracle
+    function getPrice(address token)
+        external
+        view
+        override
+        returns (uint256 price, uint256 timestamp)
+    {
+        PriceData memory data = _priceData[token];
+        if (data.price == 0) revert MockPriceOracle__PriceNotSet(token);
+        return (data.price, data.updatedAt);
+    }
+
+    /// @inheritdoc IPriceOracle
+    /// @dev Revert nếu price stale hơn maxPriceAge giây
+    function getPriceSafe(address token)
+        external
+        view
+        override
+        returns (uint256 price)
+    {
+        PriceData memory data = _priceData[token];
+        if (data.price == 0) revert MockPriceOracle__PriceNotSet(token);
+
+        uint256 age = block.timestamp - data.updatedAt;
+        if (age > _maxPriceAge) {
+            revert MockPriceOracle__PriceStale(token, age, _maxPriceAge);
+        }
+
+        return data.price;
+    }
+
+    /// @inheritdoc IPriceOracle
+    /// @dev Tính giá trị USD (6 decimals) từ amount token
+    function getValueInUSD(address token, uint256 amount, uint8 decimals)
+        external
+        view
+        override
+        returns (uint256 valueUSD)
+    {
+        PriceData memory data = _priceData[token];
+        if (data.price == 0) revert MockPriceOracle__PriceNotSet(token);
+
+        // amount (decimals) * price (8dec) / (10^decimals * 10^2) = USD (6dec)
+        return (amount * data.price) / (10 ** uint256(decimals) * 1e2);
+    }
+
+    /// @inheritdoc IPriceOracle
+    function getRelativePrice(address baseToken, address quoteToken)
+        external
+        view
+        override
+        returns (uint256)
+    {
+        PriceData memory base  = _priceData[baseToken];
+        PriceData memory quote = _priceData[quoteToken];
+
+        if (base.price == 0)  revert MockPriceOracle__PriceNotSet(baseToken);
+        if (quote.price == 0) revert MockPriceOracle__PriceNotSet(quoteToken);
+
+        return (base.price * 1e8) / quote.price;
+    }
+
+    /// @inheritdoc IPriceOracle
+    function isTokenSupported(address token) external view override returns (bool) {
+        return _supported[token];
+    }
+
+    /// @inheritdoc IPriceOracle
+    function getPriceFeed(address token) external view override returns (address) {
+        return priceFeeds[token];
+    }
+
+    // =========================================================
+    // HELPER — tính giá trị collateral (dùng trong tests)
+    // =========================================================
+
     /**
-     * @dev Set giá cho token (chỉ owner)
-     * @param token Địa chỉ token (address(0) = ETH)
-     * @param price Giá * 1e8 (VD: 2000 USD = 2000 * 1e8)
+     * @dev Tính giá trị collateral bằng USD (8 decimals)
+     * @param token   Địa chỉ token
+     * @param amount  Số lượng token (18 decimals cho ETH)
+     * @return        Giá trị USD (8 decimals)
+     */
+    function getCollateralValue(address token, uint256 amount)
+        external
+        view
+        returns (uint256)
+    {
+        PriceData memory data = _priceData[token];
+        if (data.price == 0) revert MockPriceOracle__PriceNotSet(token);
+        return (amount * data.price) / 1e18;
+    }
+
+    // =========================================================
+    // ADMIN — Testnet helpers
+    // =========================================================
+
+    /**
+     * @dev Set giá thủ công (owner only)
+     * @param token  Địa chỉ token (address(0) = ETH)
+     * @param price  Giá × 1e8 (VD: 2000 USD → 200000000000)
      */
     function setPrice(address token, uint256 price) external onlyOwner {
-        priceData[token] = PriceData({
-            price: price,
-            timestamp: block.timestamp
-        });
-        emit PriceUpdated(token, price, block.timestamp);
+        if (price == 0) revert MockPriceOracle__ZeroPrice();
+        _setPrice(token, price);
     }
-    
+
     /**
      * @dev Set mock price feed address
      */
-    function setPriceFeed(address token, address priceFeed) external onlyOwner {
-        priceFeeds[token] = priceFeed;
-        emit PriceFeedUpdated(token, priceFeed);
+    function setPriceFeed(address token, address feed) external onlyOwner {
+        priceFeeds[token] = feed;
+        emit PriceFeedUpdated(token, feed);
     }
-    
+
     /**
-     * @dev Lấy giá của token
-     * @return price Giá (8 decimals)
-     * @return timestamp Thời điểm cập nhật
+     * @dev Cập nhật staleness threshold (cho tests)
      */
-    function getPrice(address token) 
-        external 
-        view 
-        override 
-        returns (uint256 price, uint256 timestamp) 
-    {
-        PriceData memory data = priceData[token];
-        require(data.price > 0, "Price not set");
-        return (data.price, data.timestamp);
+    function setMaxPriceAge(uint256 newAge) external onlyOwner {
+        _maxPriceAge = newAge;
+        emit MaxPriceAgeUpdated(0, newAge);
     }
-    
+
     /**
-     * @dev Lấy giá tương đối giữa 2 token
-     * VD: ETH/USDT = bao nhiêu USDT cho 1 ETH
+     * @dev FIX M-11: Dùng EnumerableSet.values() thay vì unbounded array
+     * getSupportedTokens() an toàn với nhiều tokens
      */
-    function getRelativePrice(
-        address baseToken,
-        address quoteToken
-    ) external view override returns (uint256) {
-        PriceData memory baseData = priceData[baseToken];
-        PriceData memory quoteData = priceData[quoteToken];
-        
-        require(baseData.price > 0, "Base token price not set");
-        require(quoteData.price > 0, "Quote token price not set");
-        
-        // basePrice / quotePrice * 1e8
-        return (baseData.price * 1e8) / quoteData.price;
+    function getSupportedTokens() external view returns (address[] memory) {
+        return _tokenSet.values();
     }
-    
-    /**
-     * @dev Kiểm tra token có được hỗ trợ không
-     */
-    function isTokenSupported(address token) 
-        external 
-        view 
-        override 
-        returns (bool) 
-    {
-        return priceData[token].price > 0;
-    }
-    
-    /**
-     * @dev Lấy địa chỉ price feed (mock)
-     */
-    function getPriceFeed(address token) 
-        external 
-        view 
-        override 
-        returns (address) 
-    {
-        return priceFeeds[token];
-    }
-    
-    /**
-     * @dev Tính giá trị collateral bằng USD
-     * @param token Địa chỉ token
-     * @param amount Số lượng token (18 decimals)
-     * @return Giá trị USD (8 decimals)
-     */
-    function getCollateralValue(
-        address token,
-        uint256 amount
-    ) external view returns (uint256) {
-        PriceData memory data = priceData[token];
-        require(data.price > 0, "Price not set");
-        // amount (18 decimals) * price (8 decimals) / 1e18 = value (8 decimals)
-        return (amount * data.price) / 1e18;
+
+    // =========================================================
+    // INTERNAL
+    // =========================================================
+
+    function _setPrice(address token, uint256 price) internal {
+        _priceData[token] = PriceData({price: price, updatedAt: block.timestamp});
+
+        if (!_supported[token]) {
+            _supported[token] = true;
+            _tokenSet.add(token); // FIX M-11: EnumerableSet thay vì push
+        }
+
+        emit PriceUpdated(token, price, block.timestamp);
     }
 }

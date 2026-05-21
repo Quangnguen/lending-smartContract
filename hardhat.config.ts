@@ -14,6 +14,7 @@ export default defineConfig({
             enabled: true,
             runs: 200,
           },
+          viaIR: true,
         },
       },
       production: {
@@ -24,6 +25,7 @@ export default defineConfig({
             enabled: true,
             runs: 200,
           },
+          viaIR: true,
         },
       },
     },
@@ -42,6 +44,8 @@ export default defineConfig({
       chainType: "l1",
       url: "http://127.0.0.1:7545",
       accounts: [process.env.GANACHE_PRIVATE_KEY || ""],
+      gas: 6000000,        // Đặt gas limit rõ ràng cho mọi tx (tránh OOG estimate)
+      gasPrice: 20000000000, // 20 gwei
     },
     sepolia: {
       type: "http",
