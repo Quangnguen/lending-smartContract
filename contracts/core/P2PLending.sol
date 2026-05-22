@@ -999,25 +999,37 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
         emit CollateralRatioUpdated(old, newRatio);
     }
 
-    function setCreditScoreOracle(address _oracle) external onlyOwner {
+    /**
+     * FIX CRITICAL-5 + HIGH-5: Xóa setCreditScoreOracle immediate.
+     * Tất cả oracle/manager changes phải đi qua timelock 2 ngày.
+     * Admin không thể bypass bằng hàm trực tiếp nữa.
+     */
+    function queueCreditScoreOracleChange(address newOracle) external onlyOwner {
+        bytes32 key = keccak256("creditScoreOracle");
+        pendingAdminChanges[key] = block.timestamp;
+        pendingAdminValues[key]  = uint256(uint160(newOracle));
+        emit AdminChangeQueued(key, uint256(uint160(newOracle)), block.timestamp + ADMIN_CHANGE_DELAY);
+    }
+
+    function executeCreditScoreOracleChange() external onlyOwner {
+        bytes32 key = keccak256("creditScoreOracle");
+        uint256 queuedAt = pendingAdminChanges[key];
+        if (queuedAt == 0) revert ChangePendingOrNotQueued(key);
+        if (block.timestamp < queuedAt + ADMIN_CHANGE_DELAY) {
+            revert TimelockNotExpired(key, queuedAt + ADMIN_CHANGE_DELAY);
+        }
+        address newOracle = address(uint160(pendingAdminValues[key]));
+        delete pendingAdminChanges[key];
+        delete pendingAdminValues[key];
+
         address old = address(creditScoreOracle);
-        creditScoreOracle = ICreditScoreOracle(_oracle);
-        emit CreditScoreOracleUpdated(old, _oracle);
+        creditScoreOracle = ICreditScoreOracle(newOracle);
+        emit CreditScoreOracleUpdated(old, newOracle);
+        emit AdminChangeExecuted(key, uint256(uint160(newOracle)));
     }
 
-    function setCollateralManager(address _manager) external onlyOwner {
-        if (_manager == address(0)) revert ZeroAddress();
-        address old = address(collateralManager);
-        collateralManager = ICollateralManager(_manager);
-        emit CollateralManagerUpdated(old, _manager);
-    }
-
-    function setPriceOracle(address _oracle) external onlyOwner {
-        if (_oracle == address(0)) revert ZeroAddress();
-        address old = address(priceOracle);
-        priceOracle = IPriceOracle(_oracle);
-        emit PriceOracleUpdated(old, _oracle);
-    }
+    // FIX CRITICAL-5: Xóa setCollateralManager immediate — chỉ dùng queue+execute bên dưới.
+    // FIX CRITICAL-5: Xóa setPriceOracle immediate — chỉ dùng queue+execute bên dưới.
 
     function setDebtToken(address _debtToken) external onlyOwner {
         address old = address(debtToken);
@@ -1137,9 +1149,9 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
             try priceOracle.getPriceSafe(address(0)) returns (uint256 p) {
                 ethPrice = p;
             } catch {
-                // Oracle không khả dụng / stale → skip USD check
-                // Production: nên revert thay vì skip
-                return;
+                // FIX HIGH-3: Revert thay vì skip — tránh borrower gửi 1 wei ETH
+                // bypass hoàn toàn USD collateral check khi oracle tạm thời unavailable.
+                revert OracleUnavailable(address(0));
             }
 
             uint256 collateralValueUSD = CollateralLib.getETHCollateralValueUSD(
