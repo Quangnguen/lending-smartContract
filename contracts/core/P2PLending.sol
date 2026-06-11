@@ -1031,10 +1031,30 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
     // FIX CRITICAL-5: Xóa setCollateralManager immediate — chỉ dùng queue+execute bên dưới.
     // FIX CRITICAL-5: Xóa setPriceOracle immediate — chỉ dùng queue+execute bên dưới.
 
-    function setDebtToken(address _debtToken) external onlyOwner {
+    // STT-14 FIX: setDebtToken đi qua timelock 2 ngày — ngăn admin hoán đổi DebtToken độc hại tức thì
+    function queueDebtTokenChange(address _debtToken) external onlyOwner {
+        if (_debtToken == address(0)) revert ZeroAddress();
+        bytes32 key = keccak256("debtToken");
+        pendingAdminChanges[key] = block.timestamp;
+        pendingAdminValues[key]  = uint256(uint160(_debtToken));
+        emit AdminChangeQueued(key, uint256(uint160(_debtToken)), block.timestamp + ADMIN_CHANGE_DELAY);
+    }
+
+    function executeDebtTokenChange() external onlyOwner {
+        bytes32 key = keccak256("debtToken");
+        uint256 queuedAt = pendingAdminChanges[key];
+        if (queuedAt == 0) revert ChangePendingOrNotQueued(key);
+        if (block.timestamp < queuedAt + ADMIN_CHANGE_DELAY) {
+            revert TimelockNotExpired(key, queuedAt + ADMIN_CHANGE_DELAY);
+        }
+        address newDebtToken = address(uint160(pendingAdminValues[key]));
+        delete pendingAdminChanges[key];
+        delete pendingAdminValues[key];
+
         address old = address(debtToken);
-        debtToken = DebtToken(_debtToken);
-        emit DebtTokenUpdated(old, _debtToken);
+        debtToken = DebtToken(newDebtToken);
+        emit DebtTokenUpdated(old, newDebtToken);
+        emit AdminChangeExecuted(key, uint256(uint160(newDebtToken)));
     }
 
     /**
