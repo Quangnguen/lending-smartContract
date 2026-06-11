@@ -21,37 +21,7 @@ import "../libraries/LiquidationLib.sol";
 import "../token/DebtToken.sol";
 import "./Loan.sol";
 
-/**
- * @title P2PLending
- * @dev Factory contract — Điều phối toàn bộ P2P lending lifecycle
- *
- * ╔══════════════════════════════════════════════════════════════════╗
- * ║  KIẾN TRÚC                                                       ║
- * ╠══════════════════════════════════════════════════════════════════╣
- * ║  P2PLending (Factory)                                            ║
- * ║    ├── createLoanRequest()  → lock collateral, validate          ║
- * ║    ├── fundLoanRequest()    → clone Loan, disburse              ║
- * ║    ├── liquidateLoan()      → verify + transfer + collateral     ║
- * ║    └── cancelLoanRequest()  → return collateral                  ║
- * ║                                                                  ║
- * ║  External Deps:                                                  ║
- * ║    • CollateralManager   — custody ETH/ERC-20 collateral         ║
- * ║    • PriceOracle         — giá token (Chainlink-ready)           ║
- * ║    • CreditScoreOracle   — dynamic collateral ratio              ║
- * ║    • DebtToken (ERC-721) — ghi nhận nợ xấu Soulbound            ║
- * ╚══════════════════════════════════════════════════════════════════╝
- *
- * ╔══════════════════════════════════════════════════════════════════╗
- * ║  BẢO MẬT                                                         ║
- * ╠══════════════════════════════════════════════════════════════════╣
- * ║  • CEI Pattern: toàn bộ state changes TRƯỚC external calls       ║
- * ║  • nonReentrant: fund và liquidate                               ║
- * ║  • Pausable: emergency stop toàn bộ protocol                     ║
- * ║  • Custom errors với context — gas efficient + debuggable        ║
- * ║  • Allowance check trước khi fund (tránh stuck state)           ║
- * ║  • Oracle staleness check qua getPriceSafe()                     ║
- * ╚══════════════════════════════════════════════════════════════════╝
- */
+
 contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
     using SafeERC20     for IERC20;
     using Clones        for address;
@@ -66,11 +36,9 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
     uint256 public constant BASIS_POINTS    = 10_000;
     uint256 public constant MAX_PLATFORM_FEE = 500;   // 5% tối đa
 
-    // FIX C-4: Giới hạn collateral ratio hợp lệ
     uint256 public constant MIN_ALLOWED_COLLATERAL_RATIO = 10_000; // 100% tối thiểu
     uint256 public constant MAX_ALLOWED_COLLATERAL_RATIO = 100_000; // 1000% tối đa
 
-    // FIX H-9: 2-day timelock cho admin params nhạy cảm
     uint256 public constant ADMIN_CHANGE_DELAY = 2 days;
 
     // =========================================================
@@ -118,7 +86,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
     /// @dev Loan history borrower — EnumerableSet requestIds
     mapping(address => EnumerableSet.UintSet) private _userBorrowedRequestIds;
 
-    /// @dev Loan history lender — EnumerableSet requestIds (FIX: thay array unbounded)
+    /// @dev Loan history lender — EnumerableSet requestIds 
     mapping(address => EnumerableSet.UintSet) private _userLentRequestIds;
 
     /// @dev Reverse mapping: loanContract → requestId (để Loan có thể lookup requestId)
@@ -180,29 +148,6 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
     // LOAN CREATION — Core Function (Production-Ready)
     // =========================================================
 
-    /**
-     * @notice Tạo yêu cầu vay + lock collateral
-     *
-     * ┌─ FLOW ──────────────────────────────────────────────────────────┐
-     * │ 1. [CHECKS] Validate platform state (not paused, token OK)      │
-     * │ 2. [CHECKS] Validate loan params (LoanLib.validateLoanParams)   │
-     * │ 3. [CHECKS] Tính dynamic collateral ratio từ credit score       │
-     * │ 4. [CHECKS] Validate collateral đủ (CollateralLib)              │
-     * │             — ETH: msg.value >= amount, USD value đủ ratio      │
-     * │             — ERC-20: oracle support, USD value đủ ratio        │
-     * │ 5. [CHECKS] Giới hạn số pending requests (spam protection)      │
-     * │ 6. [EFFECTS] Ghi state: loanRequests, requestBorrower, ...      │
-     * │ 7. [EFFECTS] EnumerableSet.add(requestId)                       │
-     * │ 8. [INTERACTIONS] Lock collateral vào CollateralManager         │
-     * │             — ETH: forward msg.value                            │
-     * │             — ERC-20: safeTransferFrom borrower → CM           │
-     * │ 9. [INTERACTIONS] Refund ETH dư (nếu có)                        │
-     * │ 10. Emit events đầy đủ                                          │
-     * └─────────────────────────────────────────────────────────────────┘
-     *
-     * @param request Thông tin yêu cầu vay
-     * @return requestId ID được gán cho request này
-     */
     function createLoanRequest(LoanRequest calldata request)
         external
         payable
@@ -234,7 +179,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
             request.collateralDecimals
         );
 
-        // Fix: Enforce deadline là tối đa 7 ngày từ lúc tạo (nếu user truyền quá xa hoặc 0)
+        // Enforce deadline là tối đa 7 ngày từ lúc tạo (nếu user truyền quá xa hoặc 0)
         uint256 deadline = request.deadline;
         if (deadline == 0 || deadline > block.timestamp + 7 days) {
             deadline = block.timestamp + 7 days;
@@ -353,19 +298,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
         );
     }
 
-    // =========================================================
-    // CANCEL REQUEST
-    // =========================================================
-
-    /**
-     * @notice Hủy yêu cầu vay + nhận lại collateral
-     * Chỉ borrower, chỉ khi request còn active (chưa được fund)
-     *
-     * FIX C-2: Thêm nonReentrant — tránh reentrancy khi borrower là contract
-     * FIX C-5: Revert nếu CM fail (không silent orphan collateral)
-     * FIX H-5: Giảm _borrowerPendingCount O(1)
-     * FIX L-5: Cập nhật UserInfo.activeLoans
-     */
+  
     function cancelLoanRequest(uint256 requestId)
         external
         override
@@ -420,38 +353,6 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
     // FUND LOAN REQUEST — Production-Ready
     // =========================================================
 
-    /**
-     * @notice Lender cấp vốn cho kỏ khoản vay
-     *
-     * ┌─ FLOW (chuẩn CEI + DeFi best practices) ────────────────────────────┐
-     * │ 1. [CHECKS] Request active, not self-fund                    │
-     * │ 2. [CHECKS] Build FundingSnapshot (1 pass, no re-read)       │
-     * │ 3. [CHECKS] allowance + balance TRƯỚC state change            │
-     * │    (FundingLib.validateFunding — revert nếu không đủ)          │
-     * │ 4. [EFFECTS] requestActive = false (double-fund protection)   │
-     * │ 5. [EFFECTS] Remove khỏi pending set                         │
-     * │ 6. [EFFECTS] Clone Loan, ghi mappings (requestToLoan, reverse) │
-     * │ 7. [INTERACTIONS] Initialize Loan clone                       │
-     * │ 8. [INTERACTIONS] Register Loan với CollateralManager         │
-     * │ 9. [INTERACTIONS] setAuthorizedCaller (Loan → CM withdraw)    │
-     * │ 10.[INTERACTIONS] loan.fund(lender) — activate loan           │
-     * │ 11.[INTERACTIONS] Transfer USDT: lender → borrower (net)      │
-     * │ 12.[INTERACTIONS] Transfer USDT: lender → feeRecipient (fee)  │
-     * │ 13. Emit LoanMatched (với lenderAPY + expectedReturn)         │
-     * └─────────────────────────────────────────────────────────────────┗
-     *
-     * Race condition protection:
-     *   nonReentrant + requestActive = false trong EFFECTS
-     *   → 2 lender cùng block: 1 thành công, 1 revert tại check requestActive
-     *   EVM đảm bảo txs trong 1 block xử lý tuần tự (sequential), không song song
-     *
-     * Flash loan abuse mì tiết:
-     *   Lender phải giữ USDT liên tục (không được repay trong cùng tx)
-     *   Loan clone bị lock sau fund, không có cơ chế flash-fund-unfund
-     *
-     * @param requestId ID của loan request cần fund
-     * @return loanContract Địa chỉ Loan clone được deploy
-     */
     function fundLoanRequest(uint256 requestId)
         external
         override
@@ -589,28 +490,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
     // LIQUIDATION
     // =========================================================
 
-    /**
-     * @notice Thanh lý khoản vay — bất kỳ ai khi đủ điều kiện
-     *
-     * ┌─ FLOW (Snapshot Pattern) ─────────────────────────────────────────┐
-     * │ 1. [CHECKS] getLoanDetails() + getCollateralInfo()               │
-     * │ 2. [CHECKS] getPriceSafe() — 1 oracle read duy nhất              │
-     * │ 3. [CHECKS] Tính snapshot (HF, liquidatorGets, bonus, refund)    │
-     * │ 4. [CHECKS] validateLiquidation() — HF + self-liq + allowance    │
-     * │ 5. [EFFECTS] loan.liquidate() — status = LIQUIDATED              │
-     * │ 6. [INTERACT] USDT.safeTransferFrom(liquidator → lender, debt)   │
-     * │ 7. [INTERACT] CM.liquidateCollateralWithSnapshot(snapshot)        │
-     * │ 8. [INTERACT] DebtToken.mintDebtToken() [try-catch]              │
-     * └───────────────────────────────────────────────────────────────────┘
-     *
-     * Bảo mật:
-     *   • Self-liquidation: LiquidationLib.validateLiquidation() check
-     *   • Reentrancy: nonReentrant + CEI (loan.liquidate() TRƯỚC transfer)
-     *   • Oracle staleness: getPriceSafe() revert nếu price cũ hơn maxAge
-     *   • Single oracle read: snapshot lock giá 1 lần, CM không đọc lại
-     *   • Front-running: snapshot chỉ valid tại block.timestamp hiện tại
-     *   • Flash loan: không có lợi ích kinh tế (trả USDT → nhận collateral)
-     */
+    
     function liquidateLoan(uint256 requestId)
         external
         override
@@ -637,10 +517,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
         // Debt tại block.timestamp (principal + interest capped + lateFee)
         uint256 debtAmount = loan.getTotalRepaymentAmount();
 
-        // ── FIX C-1: Oracle read DUY NHẤT với bảo vệ bypass ──────────────
-        // TRƯỚC (sai): oracle fail → collPrice=0 → loan healthy bị liquidate
-        // SAU  (đúng): oracle fail → chỉ cho liquidate nếu đã overdue
-        //              nếu không overdue → revert (bảo vệ borrower)
+        
         uint256 collPrice;
         bool    hasValidPrice = false;
         bool    isOverdue_    = loan.isOverdue();
@@ -726,7 +603,6 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
         // ── EFFECTS ──────────────────────────────────────────────────────
         loan.liquidate(); // status → LIQUIDATED
 
-        // FIX L-5: Cập nhật UserInfo sau liquidation
         if (users[borrower].activeLoans > 0) {
             users[borrower].activeLoans--;
         }
@@ -770,27 +646,6 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
     // REPAY ON BEHALF — Gateway
     // =========================================================
 
-    /**
-     * @notice Bất kỳ ai trả nợ thay borrower
-     *
-     * ┌─ FLOW ─────────────────────────────────────────────────────────────┐
-     * │ 1. [CHECKS] Loan tồn tại + đang ACTIVE                            │
-     * │ 2. [DELEGATE] Loan.repayOnBehalf(payer) — CEI + transfer trong đó │
-     * └────────────────────────────────────────────────────────────────────┘
-     *
-     * Use cases:
-     *   1. Emergency rescue — bạn bè trả khi borrower mất ví
-     *   2. Keeper/bot — tự động trả khi loan sắp bị liquidate
-     *   3. DeFi composability — protocol khác trả để unlock collateral
-     *
-     * Payer phải approve Loan clone contract (KHÔNG phải P2PLending).
-     * Lý do: transfer xảy ra trong Loan.repayOnBehalf() với address(this) = loanClone.
-     *
-     * Collateral LUÔN về borrower dù payer là ai.
-     *
-     * @param requestId ID của loan request
-     * @param payer     Địa chỉ người chuyển USDT (phải đã approve Loan clone)
-     */
     function repayLoanOnBehalf(uint256 requestId, address payer)
         external
         override
@@ -888,9 +743,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
         return (borrowed, lent);
     }
 
-    /**
-     * FIX H-6: Paginated getUserLoans — tránh O(N) loop cho user có nhiều loans
-     */
+    
     function getUserLoansPaginated(
         address user,
         uint256 borrowOffset,
@@ -986,10 +839,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
         feeRecipient = _recipient;
     }
 
-    /**
-     * FIX C-4: Validate bounds trước khi set collateral ratio
-     * Không cho phép set 0 (cho vay không cần collateral) hoặc > 1000% (impossible)
-     */
+   
     function setMinCollateralRatio(uint256 newRatio) external onlyOwner {
         if (newRatio < MIN_ALLOWED_COLLATERAL_RATIO || newRatio > MAX_ALLOWED_COLLATERAL_RATIO) {
             revert InvalidCollateralRatio(newRatio);
@@ -999,11 +849,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
         emit CollateralRatioUpdated(old, newRatio);
     }
 
-    /**
-     * FIX CRITICAL-5 + HIGH-5: Xóa setCreditScoreOracle immediate.
-     * Tất cả oracle/manager changes phải đi qua timelock 2 ngày.
-     * Admin không thể bypass bằng hàm trực tiếp nữa.
-     */
+    
     function queueCreditScoreOracleChange(address newOracle) external onlyOwner {
         bytes32 key = keccak256("creditScoreOracle");
         pendingAdminChanges[key] = block.timestamp;
@@ -1028,10 +874,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
         emit AdminChangeExecuted(key, uint256(uint160(newOracle)));
     }
 
-    // FIX CRITICAL-5: Xóa setCollateralManager immediate — chỉ dùng queue+execute bên dưới.
-    // FIX CRITICAL-5: Xóa setPriceOracle immediate — chỉ dùng queue+execute bên dưới.
 
-    // STT-14 FIX: setDebtToken đi qua timelock 2 ngày — ngăn admin hoán đổi DebtToken độc hại tức thì
     function queueDebtTokenChange(address _debtToken) external onlyOwner {
         if (_debtToken == address(0)) revert ZeroAddress();
         bytes32 key = keccak256("debtToken");
@@ -1057,10 +900,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
         emit AdminChangeExecuted(key, uint256(uint160(newDebtToken)));
     }
 
-    /**
-     * FIX M-8: Thêm event + FIX C-4: validate rate
-     * FIX: dùng LoanLib.validateLateFeeRate() đã có sẵn
-     */
+    
     function setLateFeeRate(uint256 newRate) external onlyOwner {
         LoanLib.validateLateFeeRate(newRate); // FIX C-4: validate <= MAX_LATE_FEE_RATE
         uint256 old = lateFeeRate;
@@ -1072,10 +912,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
     function pause() external onlyOwner { _pause(); }
     function unpause() external onlyOwner { _unpause(); }
 
-    /**
-     * FIX H-9: Queue thay đổi oracle — cần 2 ngày trước khi có hiệu lực
-     * Ngăn admin front-run user với oracle độc hại
-     */
+    
     function queueOracleChange(address newOracle) external onlyOwner {
         if (newOracle == address(0)) revert ZeroAddress();
         bytes32 key = keccak256("priceOracle");
@@ -1101,9 +938,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
         emit AdminChangeExecuted(key, uint256(uint160(newOracle)));
     }
 
-    /**
-     * FIX H-9: Queue thay đổi CollateralManager — cần 2 ngày
-     */
+    
     function queueCollateralManagerChange(address newManager) external onlyOwner {
         if (newManager == address(0)) revert ZeroAddress();
         bytes32 key = keccak256("collateralManager");
@@ -1129,10 +964,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
         emit AdminChangeExecuted(key, uint256(uint160(newManager)));
     }
 
-    /**
-     * FIX L-3: Thu hồi ETH bị mắc kẹt trong P2PLending (ví dụ từ excess refund fail)
-     * Chỉ owner mới có thể gọi — emergency function
-     */
+   
     function recoverETH(address payable recipient, uint256 amount) external onlyOwner {
         if (recipient == address(0)) revert ZeroAddress();
         if (amount == 0 || amount > address(this).balance) revert InvalidLoanParams("Invalid amount");
@@ -1147,10 +979,7 @@ contract P2PLending is IP2PLending, Ownable, ReentrancyGuard, Pausable {
     // INTERNAL HELPERS
     // =========================================================
 
-    /**
-     * @dev Validate ETH collateral: check msg.value và oracle value
-     * Refund excess ETH không nằm trong scope này — handled in main flow
-     */
+    
     function _validateAndHandleETHCollateral(
         uint256 collateralAmount,
         uint256 principalUSD,

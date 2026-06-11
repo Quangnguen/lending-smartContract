@@ -10,49 +10,7 @@ import "../interfaces/IPriceOracle.sol";
 import "../interfaces/ILoan.sol";
 import "../libraries/LiquidationLib.sol";
 
-/**
- * @title CollateralManager
- * @dev Escrow layer — Quản lý tài sản thế chấp cho P2P Lending
- *
- * ╔══════════════════════════════════════════════════════════════════════╗
- * ║  TRÁCH NHIỆM                                                         ║
- * ╠══════════════════════════════════════════════════════════════════════╣
- * ║  • Custody: Giữ ETH và ERC-20 collateral an toàn                    ║
- * ║  • Release: Withdraw khi repay/cancel (borrower/Loan call)          ║
- * ║  • Liquidate: Phân phối collateral theo pre-computed snapshot        ║
- * ║  • Health: View functions cho monitoring và keeper bots              ║
- * ╚══════════════════════════════════════════════════════════════════════╝
- *
- * ╔══════════════════════════════════════════════════════════════════════╗
- * ║  BẢO MẬT                                                             ║
- * ╠══════════════════════════════════════════════════════════════════════╣
- * ║  • CEI: state change trước mọi external transfer                    ║
- * ║  • nonReentrant: deposit, withdraw, liquidateCollateralWithSnapshot  ║
- * ║  • onlyOwner: liquidate (chỉ P2PLending)                            ║
- * ║  • Loan registry: không thể overwrite đã đăng ký                   ║
- * ║  • Price staleness: getPriceSafe thay vì getPrice                   ║
- * ║  • Single oracle read: snapshot passed from P2PLending               ║
- * ╚══════════════════════════════════════════════════════════════════════╝
- *
- * ─── Key Architecture Change ─────────────────────────────────────────
- *
- *   TRƯỚC:
- *     liquidateCollateral() gọi oracle TRONG CM → 2 oracle reads (P2P + CM)
- *     Giá có thể thay đổi giữa 2 calls → inconsistent math
- *
- *   SAU (production):
- *     P2PLending tính LiquidationSnapshot (oracle read 1 lần)
- *     Gọi liquidateCollateralWithSnapshot(snapshot, liquidator)
- *     CM chỉ execute distribution theo snapshot đã lock
- *     → Oracle manipulation window = 0 trong execution path
- *
- * ─── Decimal Convention ──────────────────────────────────────────────
- *
- *   ETH collateral:  18 decimals (wei)
- *   ERC-20:          theo token decimals (phải pass khi deposit)
- *   USD values:      6 decimals (khớp USDT)
- *   Price feed:      8 decimals (Chainlink chuẩn)
- */
+
 contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using LiquidationLib for uint256;
@@ -93,10 +51,7 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
     /// @dev loanId → Loan contract address (set khi fund, không thể overwrite)
     mapping(uint256 => address) private _loanRegistry;
 
-    // =========================================================
-    // ERRORS
-    // =========================================================
-
+    
     error CM__InvalidAmount();
     error CM__CollateralNotActive(uint256 loanId);
     error CM__Unauthorized(address caller);
@@ -126,15 +81,7 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
     // DEPOSIT
     // =========================================================
 
-    /**
-     * @dev Nhận và lock collateral
-     *
-     * ETH path:    msg.value > 0, token = address(0)
-     * ERC-20 path: P2PLending đã pull token vào đây trước khi gọi
-     *
-     * FIX C-3: Chỉ owner (P2PLending) và authorizedCallers mới được gọi.
-     * Trước đây hàm public — attacker có thể front-run requestId creation.
-     */
+    
     function depositCollateral(
         uint256 loanId,
         address borrower,
@@ -150,15 +97,7 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
         _depositCollateral(loanId, borrower, token, amount, dec);
     }
 
-    /**
-     * @dev Nhận collateral với decimals chính xác (production path)
-     *
-     * FIX H-8: Cho phép cả owner và authorizedCallers gọi.
-     * P2PLending (owner) cần gọi hàm này thay vì depositCollateral()
-     * để xử lý đúng decimals cho WBTC (8dec), DAI (18dec), etc.
-     *
-     * @param decimals_ Số decimals của token (18=ETH, 8=WBTC, 6=USDT/USDC)
-     */
+    
     function depositCollateralWithDecimals(
         uint256 loanId,
         address borrower,
@@ -214,15 +153,6 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
     // WITHDRAW
     // =========================================================
 
-    /**
-     * @dev Trả collateral về borrower
-     *
-     * Caller hợp lệ:
-     *   - Borrower trực tiếp (cancel/emergency)
-     *   - Loan clone contract (authorized) — gọi khi repay
-     *
-     * CEI: state = false TRƯỚC khi transfer
-     */
     function withdrawCollateral(uint256 loanId) external override nonReentrant {
         CollateralInfo storage info = collaterals[loanId];
         if (!info.isActive) revert CM__CollateralNotActive(loanId);
@@ -255,41 +185,7 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
     // LIQUIDATION — chỉ P2PLending (owner) được gọi
     // =========================================================
 
-    /**
-     * @dev Phân phối collateral theo pre-computed LiquidationSnapshot
-     *
-     * ─── Tại sao dùng snapshot? ────────────────────────────────────────
-     *
-     * TRƯỚC (anti-pattern):
-     *   P2PLending.liquidateLoan():
-     *     1. isLiquidatable() → gọi oracle (read 1)
-     *     2. getTotalRepaymentAmount()
-     *     3. loan.liquidate()
-     *     4. USDT transfer
-     *     5. CM.liquidateCollateral() → gọi oracle lại (read 2) ← vấn đề!
-     *
-     *   Giữa bước 1 và 5, giá có thể thay đổi:
-     *   - Attacker manipulate price: block 1 isLiquidatable=true,
-     *     block 2 price khác → liquidatorGets sai
-     *   - 2 oracle calls = waste gas + inconsistency
-     *
-     * SAU (production):
-     *   P2PLending.liquidateLoan():
-     *     1. Tính snapshot = oracle read 1 lần
-     *     2. validateLiquidation(snapshot) → verify HF + allowance + balance
-     *     3. loan.liquidate() → status = LIQUIDATED
-     *     4. USDT transfer (liquidator → lender)
-     *     5. CM.liquidateCollateralWithSnapshot(snapshot) → distribute collateral
-     *
-     *   Snapshot lock giá tại bước 1 → không có oracle read sau đó
-     *
-     * ─── CEI Pattern ─────────────────────────────────────────────────
-     * EFFECTS:   info.isActive = false, info.amount = 0
-     * INTERACT:  transfer to liquidator, transfer to borrower (if surplus)
-     *
-     * @param snapshot Pre-computed từ P2PLending (giá đã lock)
-     * @param liquidator Địa chỉ nhận collateral
-     */
+    
     function liquidateCollateralWithSnapshot(
         LiquidationLib.LiquidationSnapshot calldata snapshot,
         address liquidator
@@ -355,10 +251,7 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
     // VIEW FUNCTIONS
     // =========================================================
 
-    /**
-     * @dev Tính giá trị collateral theo USD (6 decimals)
-     * Dùng decimals chính xác từ stored CollateralInfo
-     */
+    
     function getCollateralValue(uint256 loanId) external view override returns (uint256) {
         CollateralInfo storage info = collaterals[loanId];
         if (!info.isActive) return 0;
@@ -372,10 +265,6 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
         );
     }
 
-    /**
-     * @dev Tính collateral ratio = (collateralValue / debtValue) × 10000
-     * @return ratio Basis points (15000 = 150%)
-     */
     function getCollateralRatio(uint256 loanId) external view override returns (uint256) {
         CollateralInfo storage info = collaterals[loanId];
         if (!info.isActive) return 0;
@@ -399,16 +288,6 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
         return LiquidationLib.calculateHealthFactor(collateralUSD, debtUSDT);
     }
 
-    /**
-     * @dev Kiểm tra loan có thể thanh lý không
-     *
-     * Liquidatable khi:
-     *   (A) Loan đang ACTIVE + quá hạn (isOverdue), HOẶC
-     *   (B) Health Factor < liquidationThreshold (110%)
-     *
-     * Dùng getPrice() (không getPriceSafe()) vì đây là view — không revert
-     * getPriceSafe() revert nếu stale → view function sẽ luôn throw = bad UX
-     */
     function isLiquidatable(uint256 loanId) external view override returns (bool) {
         CollateralInfo storage info = collaterals[loanId];
         if (!info.isActive) return false;
@@ -440,9 +319,7 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
         return LiquidationLib.isLiquidatable(hf, liquidationThreshold, false);
     }
 
-    /**
-     * @dev Đầy đủ thông tin liquidation status — dùng cho keeper và frontend
-     */
+    
     function getLiquidationStatus(uint256 loanId)
         external
         view
@@ -576,7 +453,6 @@ contract CollateralManager is ICollateralManager, Ownable, ReentrancyGuard {
     }
 
     receive() external payable {
-        // FIX L-2: Chỉ nhận ETH từ authorized callers và owner
         // ETH gửi trực tiếp bởi 3rd party sẽ gây accounting mismatch
         if (msg.sender != owner() && !authorizedCallers[msg.sender]) {
             revert CM__DirectETHNotAllowed();

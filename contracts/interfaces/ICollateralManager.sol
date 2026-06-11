@@ -3,32 +3,7 @@ pragma solidity 0.8.28;
 
 import "../libraries/LiquidationLib.sol";
 
-/**
- * @title ICollateralManager
- * @dev Interface cho CollateralManager — Escrow layer của hệ thống
- *
- * ─── Vai trò trong hệ thống ───────────────────────────────────────────
- *
- *   P2PLending (factory) → CollateralManager (escrow)
- *
- *   1. depositCollateral(): Nhận và lock collateral khi createLoanRequest()
- *   2. registerLoan(): Link requestId ↔ Loan clone sau khi fund
- *   3. setAuthorizedCaller(): Cấp quyền Loan clone gọi withdrawCollateral()
- *   4. withdrawCollateral(): Borrower nhận lại khi repay/cancel
- *   5. liquidateCollateral(): Phân phối collateral khi liquidation
- *
- * ─── Liquidation Flow Update ──────────────────────────────────────────
- *
- *   TRƯỚC:
- *     P2PLending.liquidateLoan() → CM.liquidateCollateral()
- *     CM tự tính giá oracle trong liquidateCollateral() → risk của giá mới
- *
- *   SAU (production-ready):
- *     P2PLending tính LiquidationSnapshot (1 lần oracle read)
- *     P2PLending gọi CM.liquidateCollateralWithSnapshot(snapshot, liquidator)
- *     CM chỉ phân phối theo snapshot — không gọi oracle nữa
- *     → Giá nhất quán, audit trail rõ ràng
- */
+
 interface ICollateralManager {
 
     // =========================================================
@@ -122,22 +97,7 @@ interface ICollateralManager {
      */
     function withdrawCollateral(uint256 loanId) external;
 
-    /**
-     * @dev Thanh lý collateral theo pre-computed snapshot (production path)
-     *
-     * P2PLending tính LiquidationSnapshot 1 lần:
-     *   → Đọc oracle giá, tính health factor, tính phân phối
-     * Rồi gọi hàm này với snapshot đã tính
-     * CM chỉ execute distribution theo snapshot — không gọi oracle nữa
-     *
-     * Lợi ích:
-     *   • Oracle chỉ được đọc 1 lần → không có inconsistency
-     *   • Gas: tiết kiệm 1 oracle call (~5000 gas)
-     *   • Audit: snapshot là bằng chứng irrefutable về trạng thái lúc liquidation
-     *
-     * @param snapshot Pre-computed liquidation snapshot từ P2PLending
-     * @param liquidator Địa chỉ nhận collateral + bonus
-     */
+    
     function liquidateCollateralWithSnapshot(
         LiquidationLib.LiquidationSnapshot calldata snapshot,
         address liquidator

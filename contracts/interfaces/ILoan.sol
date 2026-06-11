@@ -1,31 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-/**
- * @title ILoan
- * @dev Interface cho Loan clone contract (EIP-1167)
- *
- * Lifecycle state machine:
- *
- *   PENDING ──fund()──► ACTIVE ──repay()──────────► REPAID
- *      │                   │     repayOnBehalf()
- *    cancel()          isOverdue()
- *      │                   │
- *      ▼                   ▼
- *   CANCELLED           OVERDUE ──[grace period]──► DEFAULTED
- *                           │
- *                       liquidate()
- *                           │
- *                           ▼
- *                       LIQUIDATED
- *
- * Key design decisions:
- *   • repayOnBehalf(): Bất kỳ ai có thể trả nợ thay borrower
- *     → Dùng khi borrower mất ví hoặc cần emergency rescue
- *   • Interest cap tại endTime (không tăng sau endTime)
- *   • Late fee riêng biệt từ endTime → repayment time
- *   • Collateral release: try-catch, không block repayment
- */
+
 interface ILoan {
 
     // =========================================================
@@ -84,12 +60,7 @@ interface ILoan {
         uint256 endTime
     );
 
-    /**
-     * @dev Emit khi repay() hoặc repayOnBehalf() thành công
-     *
-     * Trường payer phân biệt borrower tự trả vs bên thứ 3 trả thay.
-     * Trường repaidAt để audit trail chính xác (không phải block.timestamp riêng).
-     */
+    
     event LoanRepaid(
         uint256 indexed loanId,
         address indexed borrower,
@@ -161,27 +132,10 @@ interface ILoan {
     /// @dev Lender cấp vốn — chỉ factory được gọi
     function fund(address lender) external;
 
-    /**
-     * @notice Borrower tự trả nợ
-     * Require: caller == borrower, status == ACTIVE, allowance đủ
-     */
+    
     function repay() external;
 
-    /**
-     * @notice Bất kỳ ai trả nợ thay borrower
-     *
-     * Use cases:
-     *   1. Emergency rescue: bạn bè/gia đình trả thay khi borrower mất ví
-     *   2. Protocol rescue: keeper trả thay khi loan sắp bị liquidate
-     *   3. Automation: smart contract tự động trả khi deadline gần
-     *
-     * Security:
-     *   - Payer approve Loan contract với số tiền cần thiết
-     *   - Collateral vẫn về borrower (không phải payer)
-     *   - Payer không nhận được gì (pure altruistic / protocol mechanism)
-     *
-     * @param payer Địa chỉ chuyển USDT (phải đã approve)
-     */
+    
     function repayOnBehalf(address payer) external;
 
     /// @dev Thanh lý — chỉ factory được gọi

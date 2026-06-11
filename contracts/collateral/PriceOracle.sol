@@ -6,30 +6,7 @@ import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import "../interfaces/IPriceOracle.sol";
 
-/**
- * @title PriceOracle
- * @dev Oracle giá hỗ trợ cả manual feed (testnet) và Chainlink-ready (production)
- *
- * Kiến trúc 2 lớp:
- *   1. Chainlink AggregatorV3 (production) — đọc qua priceFeed address
- *   2. Manual price (testnet/fallback) — owner set thủ công
- *
- * Price format: 8 decimals (chuẩn Chainlink)
- *   VD: ETH = 2000 USD → price = 2_000_00_000_000 = 2000 * 1e8
- *
- * Staleness protection:
- *   - maxPriceAge: Thời gian tối đa giá được coi là valid (mặc định 3600s = 1h)
- *   - getPriceSafe(): revert nếu price stale quá maxPriceAge
- *   - Chainlink round data tự động có timestamp
- *
- * Production upgrade path:
- *   → setChainlinkFeed(token, feedAddress) để dùng Chainlink thay manual price
- *   → Chainlink ưu tiên hơn manual price nếu cả 2 đều set
- *
- * Bảo mật:
- *   - Pausable: owner có thể pause khi phát hiện oracle manipulation
- *   - Manual prices chỉ fallback khi không có Chainlink feed
- */
+
 contract PriceOracle is IPriceOracle, Ownable, Pausable {
 
     // =========================================================
@@ -57,10 +34,6 @@ contract PriceOracle is IPriceOracle, Ownable, Pausable {
     /// @dev Danh sách tokens được hỗ trợ (để iteration off-chain)
     address[] private _supportedTokens;
     mapping(address => bool) private _isSupported;
-
-    // =========================================================
-    // ERRORS
-    // =========================================================
 
     error PriceOracle__PriceNotAvailable(address token);
     error PriceOracle__PriceStale(address token, uint256 age, uint256 maxAge);
@@ -95,10 +68,6 @@ contract PriceOracle is IPriceOracle, Ownable, Pausable {
         return _maxPriceAge;
     }
 
-    /**
-     * @inheritdoc IPriceOracle
-     * @dev Không revert nếu stale — caller tự kiểm tra timestamp
-     */
     function getPrice(address token)
         external
         view
@@ -129,16 +98,6 @@ contract PriceOracle is IPriceOracle, Ownable, Pausable {
         return p;
     }
 
-    /**
-     * @inheritdoc IPriceOracle
-     * @dev Tính giá trị USD của một lượng token
-     *
-     * USD output: 6 decimals (khớp với USDT principal)
-     * Formula: valueUSD = amount * price / (10^tokenDecimals * 100)
-     *   - price: 8 decimals (Chainlink)
-     *   - tokenDecimals: decimals của token
-     *   - /100 để down-scale từ 8dec → 6dec
-     */
     function getValueInUSD(
         address token,
         uint256 amount,
@@ -190,21 +149,11 @@ contract PriceOracle is IPriceOracle, Ownable, Pausable {
     // ADMIN FUNCTIONS
     // =========================================================
 
-    /**
-     * @dev Set giá thủ công (testnet / fallback)
-     * @param token  Địa chỉ token (address(0) = ETH)
-     * @param price  Giá × 1e8 (VD: 2000 USD = 200_000_000_000)
-     */
     function setManualPrice(address token, uint256 price) external onlyOwner {
         if (price == 0) revert PriceOracle__InvalidPrice(token, 0);
         _setManualPrice(token, price);
     }
 
-    /**
-     * @dev Set Chainlink AggregatorV3 feed (production)
-     * @param token    Token cần set feed
-     * @param feed     Địa chỉ Chainlink AggregatorV3Interface
-     */
     function setChainlinkFeed(address token, address feed) external onlyOwner {
         if (feed == address(0)) revert PriceOracle__ZeroAddress();
         _chainlinkFeeds[token] = feed;
@@ -251,13 +200,6 @@ contract PriceOracle is IPriceOracle, Ownable, Pausable {
     // INTERNAL
     // =========================================================
 
-    /**
-     * @dev Internal: Lấy giá từ Chainlink (nếu có feed) hoặc manual price
-     *
-     * Priority:
-     *   1. Chainlink AggregatorV3 (nếu feed được set)
-     *   2. Manual price (fallback / testnet)
-     */
     function _getPrice(address token)
         internal
         view
@@ -275,12 +217,6 @@ contract PriceOracle is IPriceOracle, Ownable, Pausable {
         return (data.price, data.updatedAt);
     }
 
-    /**
-     * @dev Đọc giá từ Chainlink AggregatorV3Interface
-     *
-     * Production note: Cần thêm Chainlink dependency và uncomment code bên dưới.
-     * Hiện tại là stub để không phụ thuộc package ngoài.
-     */
     function _getChainlinkPrice(address feed, address token)
         internal
         view

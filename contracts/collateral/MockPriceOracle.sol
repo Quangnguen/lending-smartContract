@@ -5,14 +5,7 @@ import "../interfaces/IPriceOracle.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
-/**
- * @title MockPriceOracle
- * @dev Oracle giá giả lập cho testnet / unit tests
- *
- * Implement đầy đủ IPriceOracle (bao gồm getPriceSafe, getValueInUSD, maxPriceAge).
- * Price format: 8 decimals (chuẩn Chainlink)
- *   VD: ETH = $2000 → 2_000_00_000_000 = 200000000000
- */
+
 contract MockPriceOracle is IPriceOracle, Ownable {
     using EnumerableSet for EnumerableSet.AddressSet; // FIX M-11
 
@@ -35,12 +28,7 @@ contract MockPriceOracle is IPriceOracle, Ownable {
     mapping(address => address)   public  priceFeeds;
     mapping(address => bool)      private _supported;
 
-    /// @dev FIX M-11: Dùng EnumerableSet thay array unbounded
     EnumerableSet.AddressSet private _tokenSet;
-
-    // =========================================================
-    // ERRORS
-    // =========================================================
 
     error MockPriceOracle__PriceNotSet(address token);
     error MockPriceOracle__PriceStale(address token, uint256 age, uint256 maxAge);
@@ -140,12 +128,7 @@ contract MockPriceOracle is IPriceOracle, Ownable {
     // HELPER — tính giá trị collateral (dùng trong tests)
     // =========================================================
 
-    /**
-     * @dev Tính giá trị collateral bằng USD (8 decimals)
-     * @param token   Địa chỉ token
-     * @param amount  Số lượng token (18 decimals cho ETH)
-     * @return        Giá trị USD (8 decimals)
-     */
+   
     function getCollateralValue(address token, uint256 amount)
         external
         view
@@ -160,11 +143,7 @@ contract MockPriceOracle is IPriceOracle, Ownable {
     // ADMIN — Testnet helpers
     // =========================================================
 
-    /**
-     * @dev Set giá thủ công (owner only)
-     * @param token  Địa chỉ token (address(0) = ETH)
-     * @param price  Giá × 1e8 (VD: 2000 USD → 200000000000)
-     */
+   
     function setPrice(address token, uint256 price) external onlyOwner {
         if (price == 0) revert MockPriceOracle__ZeroPrice();
         _setPrice(token, price);
@@ -186,10 +165,7 @@ contract MockPriceOracle is IPriceOracle, Ownable {
         emit MaxPriceAgeUpdated(0, newAge);
     }
 
-    /**
-     * @dev FIX M-11: Dùng EnumerableSet.values() thay vì unbounded array
-     * getSupportedTokens() an toàn với nhiều tokens
-     */
+    
     function getSupportedTokens() external view returns (address[] memory) {
         return _tokenSet.values();
     }

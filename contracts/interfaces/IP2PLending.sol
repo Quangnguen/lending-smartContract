@@ -1,34 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-/**
- * @title IP2PLending
- * @dev Interface cho P2PLending factory contract
- *
- * Design principles:
- * - createLoanRequest: Borrower gửi yêu cầu + lock collateral
- * - fundLoanRequest:   Lender cấp vốn, deploy Loan clone, disburse
- * - liquidateLoan:     Bất kỳ ai cũng kích hoạt khi điều kiện đủ
- * - cancelLoanRequest: Borrower hủy + nhận lại collateral
- */
+
 interface IP2PLending {
 
     // =========================================================
     // STRUCTS
     // =========================================================
 
-    /**
-     * @dev Yêu cầu vay từ borrower
-     *
-     * Lưu ý về decimals:
-     * - principal:        6 decimals (USDT)
-     * - interestRate:     basis points (1000 = 10%/năm)
-     * - collateralAmount: 18 decimals nếu ETH, theo token nếu ERC-20
-     * - duration:         giây (86400 = 1 ngày)
-     *
-     * collateralToken == address(0) → ETH collateral (msg.value)
-     * collateralToken != address(0) → ERC-20 collateral (approve trước)
-     */
+    
     struct LoanRequest {
         address loanToken;          // Token cho vay (phải được whitelist)
         address collateralToken;    // Token thế chấp (address(0) = ETH)
@@ -159,31 +139,18 @@ interface IP2PLending {
     error LoanNotActive(uint256 requestId);
     error NotLiquidatable(uint256 requestId);
     error RepayOnBehalfFailed(uint256 requestId, address payer);
-    // FIX C-1: Oracle không có giá hợp lệ — không cho liquidate
     error OracleUnavailable(address token);
-    // FIX C-4: Collateral ratio ngoài khoảng cho phép
     error InvalidCollateralRatio(uint256 ratio);
-    // FIX C-4: LateFee rate không hợp lệ
     error InvalidLateFeeRate(uint256 rate, uint256 max);
-    // FIX M-6: Payer không được ủy quyền repay
     error UnauthorizedPayer(address payer, address borrower);
-    // FIX H-9: Thay đổi chưa đến thời gian
     error TimelockNotExpired(bytes32 changeKey, uint256 executeAfter);
-    // FIX H-9: Thay đổi chưa được queue
     error ChangePendingOrNotQueued(bytes32 changeKey);
 
     // =========================================================
     // WRITE FUNCTIONS
     // =========================================================
 
-    /**
-     * @dev Tạo yêu cầu vay + lock collateral
-     *
-     * ETH collateral: msg.value >= request.collateralAmount
-     * ERC-20 collateral: approve CollateralManager trước, không cần msg.value
-     *
-     * @return requestId ID của request được tạo
-     */
+    
     function createLoanRequest(LoanRequest calldata request)
         external
         payable
@@ -202,21 +169,8 @@ interface IP2PLending {
         external
         returns (address loanContract);
 
-    /**
-     * @dev Kích hoạt thanh lý (bất kỳ ai khi điều kiện đủ)
-     * Liquidator cần có đủ loanToken để trả nợ thay borrower
-     */
     function liquidateLoan(uint256 requestId) external;
 
-    /**
-     * @dev Bất kỳ ai trả nợ thay borrower
-     *
-     * Payer phải approve Loan contract với số tiền cần thiết trước.
-     * Collateral vẫn về borrower (không phải payer).
-     *
-     * @param requestId ID của loan request
-     * @param payer     Địa chỉ người chuyển USDT (phải đã approve Loan clone)
-     */
     function repayLoanOnBehalf(uint256 requestId, address payer) external;
 
     // =========================================================

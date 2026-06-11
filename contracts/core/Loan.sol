@@ -9,48 +9,7 @@ import "../interfaces/ICollateralManager.sol";
 import "../libraries/LoanLib.sol";
 import "../libraries/RepaymentLib.sol";
 
-/**
- * @title Loan
- * @dev Clone contract cho từng khoản vay — EIP-1167 Minimal Proxy Pattern
- *
- * ╔══════════════════════════════════════════════════════════════════════╗
- * ║  THIẾT KẾ BẢO MẬT                                                   ║
- * ╠══════════════════════════════════════════════════════════════════════╣
- * ║  • EIP-1167 Clone: tiết kiệm ~90% gas so với deploy đầy đủ          ║
- * ║  • Implementation lock: constructor set _initialized = true          ║
- * ║    → Ngăn attacker gọi initialize() trên implementation contract     ║
- * ║  • CEI Pattern: mọi state change TRƯỚC external calls                ║
- * ║  • nonReentrant: bảo vệ repay(), repayOnBehalf(), liquidate()        ║
- * ║  • Factory-only: fund(), liquidate() chỉ P2PLending                  ║
- * ║  • Interest cap: tính đến endTime, không tăng sau đáo hạn            ║
- * ║  • repayOnBehalf: bất kỳ ai trả thay, collateral về borrower         ║
- * ╚══════════════════════════════════════════════════════════════════════╝
- *
- * ─── Repayment Flow ─────────────────────────────────────────────────────
- *
- *  repay() / repayOnBehalf(payer):
- *    CHECKS  → validate status, payer allowance + balance
- *    EFFECTS → status = REPAID, ghi repaidAt, actualPayer, amountRepaid
- *              emit LoanRepaid (đầy đủ breakdown)
- *    INTERACT→ safeTransferFrom(payer → lender, totalAmount)
- *              collateralManager.withdrawCollateral() [try-catch]
- *              emit CollateralReleased / CollateralReleaseFailed
- *
- * ─── Interest Model ──────────────────────────────────────────────────────
- *
- *   interest = P × R × min(now, endTime) / (10000 × 365days)
- *   lateFee  = P × dailyRate × daysLate  (chỉ khi now > endTime)
- *   total    = principal + interest + lateFee
- *
- *   Lý do cap interest tại endTime:
- *   → Tránh double-counting: interest và lateFee không overlap
- *   → Borrower biết trước worst-case interest (predictable UX)
- *   → Chuẩn của Maple Finance, TrueFi, Goldfinch
- *
- * Lifecycle: PENDING → ACTIVE → REPAID
- *                          ↘ (overdue + grace) ACTIVE → LIQUIDATED
- *            PENDING → CANCELLED (chỉ qua P2PLending.cancelLoanRequest)
- */
+
 contract Loan is ILoan, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using LoanLib   for uint256;
@@ -129,29 +88,11 @@ contract Loan is ILoan, ReentrancyGuard {
     // CONSTRUCTOR — Lock implementation contract
     // =========================================================
 
-    /**
-     * @dev Lock implementation contract ngay trong constructor.
-     *
-     * EIP-1167 Clones.clone() không chạy constructor của implementation.
-     * Nhưng chính implementation này cần bị lock để ngăn attacker gọi
-     * initialize() trên nó (dù không ảnh hưởng đến các clone đã deploy).
-     *
-     * Pattern chuẩn: OpenZeppelin Initializable._disableInitializers()
-     */
+    
     constructor() {
         _initialized = true;
     }
 
-    // =========================================================
-    // INITIALIZE — Thay thế constructor cho clone
-    // =========================================================
-
-    /**
-     * @dev Khởi tạo clone — P2PLending gọi ngay sau Clones.clone()
-     *
-     * Chỉ được gọi 1 lần (guard _initialized).
-     * msg.sender trở thành factory — chỉ factory gọi fund()/liquidate().
-     */
     function initialize(
         uint256 _loanId,
         address _borrower,
@@ -198,14 +139,7 @@ contract Loan is ILoan, ReentrancyGuard {
         );
     }
 
-    // =========================================================
-    // FUND — Chỉ factory
-    // =========================================================
-
-    /**
-     * @dev Lender cấp vốn — P2PLending.fundLoanRequest() gọi hàm này
-     * Chuyển trạng thái PENDING → ACTIVE, ghi lại startTime/endTime
-     */
+   
     function fund(address lender)
         external
         override
@@ -229,28 +163,6 @@ contract Loan is ILoan, ReentrancyGuard {
         );
     }
 
-    // =========================================================
-    // REPAY — Borrower tự trả
-    // =========================================================
-
-    /**
-     * @notice Borrower trả nợ đầy đủ
-     *
-     * ┌─ CEI Pattern ───────────────────────────────────────────────────┐
-     * │ CHECKS:                                                          │
-     * │   1. status == ACTIVE                                            │
-     * │   2. Tính breakdown (principal, interest capped, lateFee)        │
-     * │   3. allowance >= totalAmount                                    │
-     * │   4. balance >= totalAmount                                      │
-     * │ EFFECTS:                                                         │
-     * │   5. status = REPAID, amountRepaid, repaidAt, actualPayer        │
-     * │   6. emit LoanRepaid (đầy đủ params)                            │
-     * │ INTERACTIONS:                                                    │
-     * │   7. safeTransferFrom(borrower → lender, totalAmount)           │
-     * │   8. collateralManager.withdrawCollateral() [try-catch]          │
-     * │   9. emit CollateralReleased / CollateralReleaseFailed           │
-     * └─────────────────────────────────────────────────────────────────┘
-     */
     function repay()
         external
         override
@@ -261,31 +173,7 @@ contract Loan is ILoan, ReentrancyGuard {
         _executeRepayment(msg.sender);
     }
 
-    // =========================================================
-    // REPAY ON BEHALF — Bất kỳ ai trả thay
-    // =========================================================
-
-    /**
-     * @notice Bất kỳ ai trả nợ thay cho borrower
-     *
-     * Use cases chính:
-     *   1. Emergency rescue: bạn bè/gia đình trả khi borrower mất access
-     *   2. Keeper/bot: tự động trả khi loan sắp bị liquidate (bảo vệ collateral)
-     *   3. DeFi composability: protocol khác trả thay để mua loan position
-     *
-     * Security model:
-     *   • Payer phải approve Loan contract trước
-     *   • Collateral LUÔN về borrower (không phải payer)
-     *   • Không ai được lợi ích trực tiếp từ việc trả thay
-     *   • onlyBorrower không apply — bất kỳ ai đều được
-     *
-     * Flash loan abuse analysis:
-     *   • Kẻ tấn công flash borrow USDT → repay thay borrower → nhận lại gì?
-     *   • Không nhận được gì: collateral về borrower, không về payer
-     *   • Tấn công vô nghĩa về kinh tế → safe
-     *
-     * @param payer Địa chỉ chuyển USDT (phải đã approve Loan contract)
-     */
+  
     function repayOnBehalf(address payer)
         external
         override
@@ -300,16 +188,7 @@ contract Loan is ILoan, ReentrancyGuard {
         _executeRepayment(payer);
     }
 
-    // =========================================================
-    // LIQUIDATE — Chỉ factory
-    // =========================================================
-
-    /**
-     * @dev Thanh lý khoản vay — P2PLending.liquidateLoan() entry point duy nhất
-     *
-     * Factory đã verify isLiquidatable() và handle USDT transfer trước.
-     * Hàm này chỉ update state (EFFECTS only — không có INTERACTIONS).
-     */
+    
     function liquidate()
         external
         override
@@ -321,20 +200,7 @@ contract Loan is ILoan, ReentrancyGuard {
         emit LoanLiquidated(loanDetails.loanId, msg.sender, loanDetails.collateralAmount);
     }
 
-    // =========================================================
-    // CANCEL — Chỉ borrower, chỉ khi PENDING
-    // =========================================================
-
-    /**
-     * @dev Hủy request trước khi được fund
-     *
-     * FIX C-6: Chỉ factory (P2PLending) mới được gọi cancel.
-     * Trước đây borrower gọi trực tiếp làm bypass P2PLending state update.
-     *
-     * Flow đúng:
-     *   Borrower → P2PLending.cancelLoanRequest() → Loan.cancel()
-     *   (P2PLending cập nhật requestActive + _pendingRequestIds trước)
-     */
+   
     function cancel()
         external
         override
@@ -362,22 +228,7 @@ contract Loan is ILoan, ReentrancyGuard {
         return loanDetails;
     }
 
-    /**
-     * @notice Breakdown số tiền cần trả tại block.timestamp
-     *
-     * KEY FIX: Interest được cap tại endTime.
-     *
-     * Ví dụ (principal=1000 USDT, rate=10%/năm, duration=30d):
-     *   Trả đúng hạn (ngày 30):
-     *     interest = 1000 × 10% × 30/365 = 8.22 USDT
-     *     lateFee  = 0
-     *     total    = 1008.22 USDT
-     *
-     *   Trả trễ 10 ngày (ngày 40):
-     *     interest = 1000 × 10% × 30/365 = 8.22 USDT (KHÔNG tăng thêm)
-     *     lateFee  = 1000 × 0.5% × 10 = 50 USDT
-     *     total    = 1058.22 USDT
-     */
+   
     function getRepaymentBreakdown()
         public
         view
@@ -412,33 +263,12 @@ contract Loan is ILoan, ReentrancyGuard {
         // FIX L-7: Dùng GRACE_PERIOD (1 ngày) — borrower có 1 ngày sau deadline trước khi bị liquidate
     }
 
-    /**
-     * @inheritdoc ILoan
-     * @dev Dynamic ratio cần oracle — do CollateralManager.getCollateralRatio() tính
-     * Loan clone không có oracle access để giữ contract nhẹ
-     */
+   
     function getCurrentCollateralRatio() external pure override returns (uint256) {
         return 0; // Caller dùng CollateralManager.getCollateralRatio(loanId)
     }
 
-    // =========================================================
-    // INTERNAL — Core repayment logic (shared by repay + repayOnBehalf)
-    // =========================================================
-
-    /**
-     * @dev Execute repayment — dùng chung cho repay() và repayOnBehalf()
-     *
-     * @param payer Địa chỉ chuyển USDT (borrower khi tự trả, hoặc bên thứ 3)
-     *
-     * ─── CEI Pattern ───────────────────────────────────────────────────
-     * CHECKS:
-     *   Tính breakdown → validate allowance + balance của payer
-     * EFFECTS:
-     *   Cập nhật state hoàn toàn trước bất kỳ external call nào
-     * INTERACTIONS:
-     *   Transfer USDT → release collateral
-     * ───────────────────────────────────────────────────────────────────
-     */
+    
     function _executeRepayment(address payer) internal {
         // ── CHECKS ──────────────────────────────────────────────────────────
         // Build full breakdown (interest capped tại endTime)
@@ -499,16 +329,6 @@ contract Loan is ILoan, ReentrancyGuard {
         _releaseCollateral(loanId, borrower);
     }
 
-    /**
-     * @dev Release collateral sau khi repay thành công
-     * Dùng try-catch để collateral fail không block việc trả nợ
-     *
-     * Tại sao try-catch?
-     *   • Repayment đã completed (state = REPAID, transfer done)
-     *   • Không nên revert toàn bộ tx vì CM có vấn đề
-     *   • Borrower có thể tự withdraw thông qua CM sau đó
-     *   • emit event đủ context để recover
-     */
     function _releaseCollateral(uint256 loanId, address borrower) internal {
         if (address(collateralManager) == address(0)) return;
 
